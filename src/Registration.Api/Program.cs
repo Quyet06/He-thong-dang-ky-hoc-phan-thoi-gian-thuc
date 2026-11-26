@@ -1,15 +1,21 @@
+using Microsoft.AspNetCore.SignalR;
+using Registration.Api.Hubs;
 using Registration.Api.Models;
 using Registration.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+
 builder.Services.AddSingleton<CourseRegistrationStore>();
+builder.Services.AddSingleton<CourseWatcherRegistry>();
+builder.Services.AddSignalR();
 
 var app = builder.Build();
 
 app.MapGet("/", () => Results.Ok(new
 {
     service = "Registration.Api",
-    status = "running"
+    status = "running",
+    hub = "/hubs/courses"
 }));
 
 app.MapGet("/courses", (CourseRegistrationStore store) =>
@@ -25,10 +31,13 @@ app.MapGet("/courses/{id:int}", (int id, CourseRegistrationStore store) =>
         : Results.Ok(course);
 });
 
-app.MapPost("/registrations", (
+app.MapPost("/registrations", async (
     CreateRegistrationRequest request,
     CourseRegistrationStore store,
-    ILogger<Program> logger) =>
+    IHubContext<CourseCapacityHub> hubContext,
+    CourseWatcherRegistry watcherRegistry,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
 {
     var result = store.CreateRegistration(request.StudentId, request.CourseId);
     if (!result.IsSuccess)
@@ -51,13 +60,25 @@ app.MapPost("/registrations", (
         registration.CourseCode,
         registration.RemainingSeats);
 
+    await PublishCapacityUpdateAsync(
+        store,
+        hubContext,
+        watcherRegistry,
+        logger,
+        registration.CourseId,
+        "RegistrationCreated",
+        cancellationToken);
+
     return Results.Created($"/registrations/{registration.Id}", registration);
 });
 
-app.MapDelete("/registrations/{id:guid}", (
+app.MapDelete("/registrations/{id:guid}", async (
     Guid id,
     CourseRegistrationStore store,
-    ILogger<Program> logger) =>
+    IHubContext<CourseCapacityHub> hubContext,
+    CourseWatcherRegistry watcherRegistry,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
 {
     var result = store.CancelRegistration(id);
     if (!result.IsSuccess)
@@ -79,6 +100,15 @@ app.MapDelete("/registrations/{id:guid}", (
         cancelled.CourseCode,
         cancelled.RemainingSeats);
 
+    await PublishCapacityUpdateAsync(
+        store,
+        hubContext,
+        watcherRegistry,
+        logger,
+        cancelled.CourseId,
+        "RegistrationCancelled",
+        cancellationToken);
+
     return Results.Ok(cancelled);
 });
 
@@ -92,7 +122,51 @@ app.MapGet("/students/{studentId}/registrations", (
         : ToErrorResult(result.Error!);
 });
 
+app.MapHub<CourseCapacityHub>("/hubs/courses");
+
 app.Run();
+
+static async Task PublishCapacityUpdateAsync(
+    CourseRegistrationStore store,
+    IHubContext<CourseCapacityHub> hubContext,
+    CourseWatcherRegistry watcherRegistry,
+    ILogger logger,
+    int courseId,
+    string eventType,
+    CancellationToken cancellationToken)
+{
+    var course = store.GetCourseById(courseId);
+    if (course is null)
+    {
+        return;
+    }
+
+    var payload = new CourseCapacityUpdated(
+        course.Id,
+        course.Code,
+        course.Name,
+        course.Capacity,
+        course.EnrolledCount,
+        course.RemainingSeats,
+        eventType,
+        DateTimeOffset.UtcNow);
+
+    await hubContext.Clients
+        .Group(CourseGroups.AllCourses)
+        .SendAsync("CourseCapacityUpdated", payload, cancellationToken);
+
+    var excluded = watcherRegistry.GetAllCourseConnectionIds();
+    await hubContext.Clients
+        .GroupExcept(CourseGroups.ForCourse(course.Id), excluded)
+        .SendAsync("CourseCapacityUpdated", payload, cancellationToken);
+
+    logger.LogInformation(
+        "SignalR da day su kien {EventType} cho lop {CourseCode}: con lai {RemainingSeats}/{Capacity} cho",
+        eventType,
+        course.Code,
+        course.RemainingSeats,
+        course.Capacity);
+}
 
 static IResult ToErrorResult(StoreError error)
 {

@@ -34,6 +34,19 @@ public sealed record RegistrationDto(
     int RemainingSeats);
 
 /// <summary>
+/// Real-time notification payload pushed to SignalR subscribers when course capacity changes.
+/// </summary>
+public sealed record CourseCapacityUpdated(
+    int CourseId,
+    string CourseCode,
+    string CourseName,
+    int Capacity,
+    int EnrolledCount,
+    int RemainingSeats,
+    string EventType,
+    DateTimeOffset UpdatedAt);
+
+/// <summary>
 /// Standardized error contract returned for non-success HTTP responses.
 /// </summary>
 public sealed record ApiError(
